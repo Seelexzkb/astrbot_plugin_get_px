@@ -1,0 +1,4 @@
+pixivpy-async
+aiohttp
+Pillow
+lunar-python

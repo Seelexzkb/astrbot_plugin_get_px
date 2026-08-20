@@ -1,0 +1,725 @@
+"""AstrBot 插件 — 插画发图与签到
+
+通过标签搜索插画并发送图片，支持 Lolicon / Nyan.run 双图片源（顺序可配）、Pixiv 回退、年龄分级放行配置、多标签 AND 检索、标签与作品黑名单、多页作品、自然语言自动触发和签到。
+
+搜索指令：
+    /p [标签...] [数量]        搜索并发送图片；多个标签用空格分隔，只返回同时包含所有标签的作品
+
+自动触发（需在配置中开启）：
+    来一份图                   发送 1 张随机图片
+    来三张初音ミク图             搜索标签「初音ミク」发送 3 张
+
+签到指令：
+    /签到                      每日签到
+    /签到帮助                  查看所有签到指令
+    /签到我的                  个人签到资料
+    /签到排行                  查看签到排行
+    /签到商店                  访问签到商店
+    /签到管理                  签到管理功能（仅管理员）
+"""
+
+# 注意：不要在本模块使用 `from __future__ import annotations`。
+# AstrBot 识别 GreedyStr 的规则：
+# - 无默认值时：`annotation is GreedyStr`
+# - 有默认值时：`default is GreedyStr`（不是看注解）
+# 因此这里使用 GreedyStr 类作为默认哨兵，既保留贪婪参数，又支持直接无参调用。
+# 字符串化注解会让贪婪参数失效。
+
+import asyncio
+from pathlib import Path
+import re
+import time
+import weakref
+
+from astrbot.api.all import AstrBotConfig, Image, logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.star import Context, Star
+from astrbot.core.star.filter.command import GreedyStr
+from astrbot.core.star.star_tools import StarTools
+from .checkin import CheckinStore, UnversionedCheckinDatabaseError
+from .checkin.application import CheckinApplicationMixin
+from .checkin.artwork import CheckinArtworkMixin
+from .checkin.cache import CheckinCardCache
+from .checkin.commands import CheckinCommandMixin
+from .checkin.greeting import CheckinGreetingGenerator
+from .checkin.holiday import HolidayCalendar
+from .checkin.shop import CheckinShopMixin
+from .pixiv import DeliveryMixin, FiltersMixin, SearchMixin
+from .pixiv.client import PixivClient
+from .pixiv.downloader import ImageDownloader
+from .pixiv.index import ImageIndexStore
+from .pixiv.lolicon import LoliconClient
+from .pixiv.nyan import NyanRunClient
+from .plugin_api import PluginWebApi
+
+# ──────────────────────────────────────────────────────────────────────
+# 常量
+# ──────────────────────────────────────────────────────────────────────
+
+LOG_PREFIX = "[GetPx]"
+PLUGIN_NAME = "astrbot_plugin_get_px"
+PLUGIN_VERSION = "v3.5.0"
+WEB_INTERNAL_ERROR_MESSAGE = "服务内部错误，请稍后重试"
+
+AUTO_TRIGGER_PATTERN = r"^/?(来\s*(.*?)(份|个|张|点))(.*?)(福利|色|瑟|涩|塞)?图$"
+CHECKIN_REGEX_PATTERN = r"^(?!/)签到$"
+CHECKIN_HELP_IMAGE = (
+    Path(__file__).resolve().parent / "assets" / "checkin_help_v4.png"
+)
+
+
+CHINESE_NUMBER_MAP = {
+    "一": "1",
+    "二": "2",
+    "两": "2",
+    "三": "3",
+    "四": "4",
+    "五": "5",
+    "六": "6",
+    "七": "7",
+    "八": "8",
+    "九": "9",
+    "十": "10",
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# 插件主类
+# ──────────────────────────────────────────────────────────────────────
+
+
+class GetPxPlugin(
+    CheckinApplicationMixin,
+    CheckinCommandMixin,
+    CheckinShopMixin,
+    CheckinArtworkMixin,
+    SearchMixin,
+    DeliveryMixin,
+    FiltersMixin,
+    Star,
+):
+    def __init__(self, context: Context, config: AstrBotConfig):
+        super().__init__(context, config)
+        self.config = config
+        self.client: PixivClient | None = None
+        self.lolicon_client: LoliconClient | None = None
+        self.nyan_run_client: NyanRunClient | None = None
+        self.downloader = ImageDownloader(
+            self._cfg_str("lolicon_image_proxy_origins", "")
+        )
+        self._last_request: dict[str, float] = {}
+        self.data_dir: Path | None = None
+        self.image_index: ImageIndexStore | None = None
+        self.plugin_web_api = PluginWebApi(
+            self,
+            plugin_name=PLUGIN_NAME,
+            log_prefix=LOG_PREFIX,
+            internal_error_message=WEB_INTERNAL_ERROR_MESSAGE,
+        )
+        self.checkin_store: CheckinStore | None = None
+        self.checkin_cache: CheckinCardCache | None = None
+        self.checkin_greeting = CheckinGreetingGenerator(context)
+        self.holiday_calendar: HolidayCalendar | None = None
+        self._holiday_refresh_task: asyncio.Task | None = None
+        self._termination_task: asyncio.Task[None] | None = None
+        self._checkin_flow_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
+
+    # ──────────────────────────────────────────────────────────────
+    # 生命周期
+    # ──────────────────────────────────────────────────────────────
+
+    async def initialize(self):
+        """插件加载时初始化 Pixiv 客户端。"""
+        data_dir = StarTools.get_data_dir(PLUGIN_NAME)
+        self.data_dir = Path(data_dir)
+        dedupe_days = self._migrate_dedupe_config()
+        self._init_client()
+        # SQLite DDL/迁移是同步操作，放入线程池避免阻塞事件循环
+        self.image_index = await asyncio.to_thread(
+            ImageIndexStore,
+            data_dir,
+            retention_days=dedupe_days,
+        )
+        await self.image_index.cleanup_old_days(trigger="startup")
+        checkin_database_existed = (self.data_dir / "checkin.sqlite3").exists()
+        try:
+            self.checkin_store = await asyncio.to_thread(CheckinStore, data_dir)
+        except UnversionedCheckinDatabaseError:
+            logger.error(
+                f"{LOG_PREFIX} 签到数据库缺少 schema 版本号且已包含数据表，"
+                "无法确认其格式。如果是从 v2.8.x 升级，请先使用插件 3.0.0 "
+                f"启动一次完成数据迁移，再升级到 {PLUGIN_VERSION}；"
+                "否则请检查或移除 checkin.sqlite3 后重启。"
+            )
+            raise
+        database_action = "已加载" if checkin_database_existed else "已创建"
+        logger.info(
+            f"{LOG_PREFIX} 签到数据库{database_action}: "
+            f"version={PLUGIN_VERSION}, path={self.checkin_store._db_path}"
+        )
+        self.checkin_cache = CheckinCardCache(self.data_dir / "checkin_card_cache")
+        await asyncio.to_thread(self.checkin_cache.cleanup_expired, force=True)
+        self.holiday_calendar = HolidayCalendar(
+            self.data_dir,
+            plugin_version=PLUGIN_VERSION,
+        )
+        self._holiday_refresh_task = asyncio.create_task(
+            self._refresh_holiday_calendar()
+        )
+        self.plugin_web_api.register()
+        logger.info(f"{LOG_PREFIX} 插件已加载: version={PLUGIN_VERSION}")
+
+    async def _refresh_holiday_calendar(self) -> None:
+        if self.holiday_calendar is None:
+            return
+        try:
+            updated = await self.holiday_calendar.refresh_if_due()
+            if updated:
+                logger.info(f"{LOG_PREFIX} 节假日数据已更新")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                f"{LOG_PREFIX} 节假日数据更新失败，继续使用本地规则: "
+                f"error_type={type(exc).__name__}"
+            )
+
+    def _init_client(self):
+        """初始化 Lolicon / Nyan.run 图片源和可选的 Pixiv 回退客户端。"""
+        lolicon_url = self._cfg_str(
+            "lolicon_api_url", "https://api.lolicon.app/setu/v2"
+        )
+        if getattr(self, "lolicon_client", None) is None:
+            self.lolicon_client = LoliconClient(
+                api_url=lolicon_url,
+                exclude_ai=self._cfg_bool("lolicon_exclude_ai", True),
+                r18=self._lolicon_r18_param(),
+                request_timeout=self._cfg_float(
+                    "request_timeout", 30.0, 5.0, 120.0
+                ),
+            )
+        if getattr(self, "nyan_run_client", None) is None:
+            nyan_url = self._cfg_str(
+                "nyan_run_api_url", "https://sex.nyan.run/api/v2/"
+            )
+            if self._cfg_bool("nyan_run_enabled", True) and nyan_url:
+                self.nyan_run_client = NyanRunClient(
+                    api_url=nyan_url,
+                    r18=self._nyan_run_r18_param(),
+                    request_timeout=self._cfg_float(
+                        "request_timeout", 30.0, 5.0, 120.0
+                    ),
+                )
+        token = self._cfg_str("pixiv_refresh_token")
+        if not token:
+            logger.info(
+                f"{LOG_PREFIX} 未配置 Pixiv refresh_token，"
+                "Lolicon / Nyan.run 失败后无 Pixiv 回退"
+            )
+            return
+
+        self.client = PixivClient(
+            refresh_token=token,
+            request_timeout=self._cfg_float("request_timeout", 30.0, 5.0, 120.0),
+        )
+        logger.info(
+            f"{LOG_PREFIX} Lolicon / Nyan.run 图片源和 Pixiv 回退客户端已初始化"
+        )
+
+    def _web_api(self) -> PluginWebApi:
+        service = getattr(self, "plugin_web_api", None)
+        if service is None:
+            service = PluginWebApi(
+                self,
+                plugin_name=PLUGIN_NAME,
+                log_prefix=LOG_PREFIX,
+                internal_error_message=WEB_INTERNAL_ERROR_MESSAGE,
+            )
+        return service
+
+    def _web_internal_error(self, action: str, exc: Exception):
+        return self._web_api().internal_error(action, exc)
+
+    async def _web_checkin_import(self):
+        return await self._web_api().checkin_import()
+
+    async def terminate(self):
+        """插件卸载/停用时清理资源，并让并发调用等待同一清理任务。"""
+        task = self._termination_task
+        if task is not None and task.done() and (
+            task.cancelled() or task.exception() is not None
+        ):
+            self._termination_task = None
+            task = None
+        if task is None:
+            task = asyncio.create_task(self._terminate_resources())
+            self._termination_task = task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled() and self._termination_task is task:
+                self._termination_task = None
+            raise
+        except Exception:
+            if self._termination_task is task:
+                self._termination_task = None
+            raise
+
+    async def _terminate_resources(self) -> None:
+        """执行一次插件资源清理。"""
+        if self._holiday_refresh_task is not None:
+            self._holiday_refresh_task.cancel()
+            await asyncio.gather(self._holiday_refresh_task, return_exceptions=True)
+            self._holiday_refresh_task = None
+        if getattr(self, "client", None) is not None:
+            try:
+                await self.client.close()
+            except Exception as exc:
+                logger.warning(
+                    f"{LOG_PREFIX} 关闭 Pixiv 客户端失败: "
+                    f"error_type={type(exc).__name__}"
+                )
+            finally:
+                self.client = None
+        if getattr(self, "lolicon_client", None) is not None:
+            try:
+                await self.lolicon_client.close()
+            except Exception as exc:
+                logger.warning(
+                    f"{LOG_PREFIX} 关闭 Lolicon 客户端失败: "
+                    f"error_type={type(exc).__name__}"
+                )
+            finally:
+                self.lolicon_client = None
+        if getattr(self, "nyan_run_client", None) is not None:
+            try:
+                await self.nyan_run_client.close()
+            except Exception as exc:
+                logger.warning(
+                    f"{LOG_PREFIX} 关闭 Nyan.run 客户端失败: "
+                    f"error_type={type(exc).__name__}"
+                )
+            finally:
+                self.nyan_run_client = None
+        try:
+            await self.downloader.close()
+        except Exception as exc:
+            logger.warning(
+                f"{LOG_PREFIX} 关闭图片下载器失败: "
+                f"error_type={type(exc).__name__}"
+            )
+        try:
+            await self.checkin_greeting.close()
+        except Exception as exc:
+            logger.warning(
+                f"{LOG_PREFIX} 关闭签到问候会话失败: "
+                f"error_type={type(exc).__name__}"
+            )
+        self._last_request.clear()
+        locks = getattr(self, "_checkin_flow_locks", None)
+        if locks is not None:
+            locks.clear()
+        if self.image_index is not None:
+            try:
+                self.image_index.close()
+            except Exception as exc:
+                logger.warning(
+                    f"{LOG_PREFIX} 关闭图片索引失败: "
+                    f"error_type={type(exc).__name__}"
+                )
+        self.image_index = None
+        self.checkin_store = None
+        logger.info(f"{LOG_PREFIX} 插件已停止")
+
+    # ──────────────────────────────────────────────────────────────
+    # 指令：搜索（主指令）
+    # ──────────────────────────────────────────────────────────────
+
+    @filter.command("p")
+    async def cmd_p(self, event: AstrMessageEvent, query: GreedyStr = GreedyStr):
+        """搜索并发送图片。参数: [标签] [数量]"""
+        if not self._ensure_client_or_error(event):
+            yield event.plain_result(
+                "⚠️ 图片源暂不可用，请检查 Lolicon / Nyan.run 配置，"
+                "或填写 pixiv_refresh_token 作为回退"
+            )
+            return
+        event.stop_event()
+        # 框架无参时传入空字符串；直接调用时则会保留默认哨兵。
+        raw_query = "" if query is GreedyStr else str(query or "")
+        tag, count = self._split_tag_and_count(raw_query)
+        async for result in self._handle_search(event, tag=tag, count_str=count):
+            yield result
+
+    @staticmethod
+    def _split_tag_and_count(query: str) -> tuple[str, str]:
+        """把 GreedyStr 参数拆成标签与尾部数量；纯数字视为随机发图数量。"""
+        tokens = query.split()
+        if not tokens:
+            return "", ""
+        if tokens[-1].isdigit():
+            return " ".join(tokens[:-1]), tokens[-1]
+        return " ".join(tokens), ""
+
+    # ──────────────────────────────────────────────────────────────
+    # 签到指令
+    # ──────────────────────────────────────────────────────────────
+
+    @filter.command("签到")
+    async def cmd_checkin(self, event: AstrMessageEvent):
+        """每日签到。"""
+        event.stop_event()
+        async for result in self._handle_checkin(event):
+            yield result
+
+    @filter.command("签到帮助")
+    async def cmd_checkin_help(self, event: AstrMessageEvent):
+        """发送签到功能帮助图。"""
+        event.stop_event()
+        if not CHECKIN_HELP_IMAGE.is_file():
+            logger.error(
+                f"{LOG_PREFIX} 签到帮助图片不存在: {CHECKIN_HELP_IMAGE}"
+            )
+            yield event.plain_result("签到帮助图片缺失，请联系管理员重新安装插件")
+            return
+        yield event.chain_result(
+            [Image.fromFileSystem(str(CHECKIN_HELP_IMAGE))]
+        )
+
+    @filter.command_group("签到我的")
+    def checkin_my(self):
+        """个人签到资料。"""
+
+    @checkin_my.command("状态")
+    async def cmd_checkin_status(self, event: AstrMessageEvent):
+        """查看金币、好感度和连续签到状态。"""
+        event.stop_event()
+        async for result in self._handle_checkin_status(event):
+            yield result
+
+    @checkin_my.command("生日查看")
+    async def cmd_checkin_birthday_view(self, event: AstrMessageEvent):
+        """查看签到生日。"""
+        event.stop_event()
+        yield event.plain_result(
+            await self._handle_checkin_birthday(event, "查看", "")
+        )
+
+    @checkin_my.command("生日设置")
+    async def cmd_checkin_birthday_set(
+        self, event: AstrMessageEvent, value: str = ""
+    ):
+        """手动设置签到生日。"""
+        event.stop_event()
+        yield event.plain_result(
+            await self._handle_checkin_birthday(event, "设置", value)
+        )
+
+    @checkin_my.command("生日清除")
+    async def cmd_checkin_birthday_clear(self, event: AstrMessageEvent):
+        """清除签到生日。"""
+        event.stop_event()
+        yield event.plain_result(
+            await self._handle_checkin_birthday(event, "清除", "")
+        )
+
+    @checkin_my.command("成就")
+    async def cmd_checkin_achievements(self, event: AstrMessageEvent):
+        """查看签到成就。"""
+        event.stop_event()
+        yield event.plain_result(await self._handle_checkin_achievements(event))
+
+    @checkin_my.command("称号查看")
+    async def cmd_checkin_titles(self, event: AstrMessageEvent):
+        """查看已解锁的签到称号。"""
+        event.stop_event()
+        yield event.plain_result(await self._handle_checkin_titles(event))
+
+    @checkin_my.command("称号佩戴")
+    async def cmd_select_checkin_title(self, event: AstrMessageEvent, title: str = ""):
+        """佩戴已解锁的签到称号。"""
+        event.stop_event()
+        yield event.plain_result(await self._handle_select_checkin_title(event, title))
+
+    @filter.command_group("签到排行")
+    def checkin_ranking(self):
+        """查看当前群的签到排行。"""
+
+    @checkin_ranking.command("今日")
+    async def cmd_checkin_ranking_today(self, event: AstrMessageEvent):
+        """查看今日签到排行。"""
+        event.stop_event()
+        yield event.plain_result(await self._handle_checkin_ranking(event, "今日"))
+
+    @checkin_ranking.command("月榜")
+    async def cmd_checkin_ranking_month(self, event: AstrMessageEvent):
+        """查看本月签到排行。"""
+        event.stop_event()
+        yield event.plain_result(await self._handle_checkin_ranking(event, "月榜"))
+
+    @checkin_ranking.command("连签")
+    async def cmd_checkin_ranking_streak(self, event: AstrMessageEvent):
+        """查看连续签到排行。"""
+        event.stop_event()
+        yield event.plain_result(await self._handle_checkin_ranking(event, "连签"))
+
+    @checkin_ranking.command("累计")
+    async def cmd_checkin_ranking_total(self, event: AstrMessageEvent):
+        """查看累计签到排行。"""
+        event.stop_event()
+        yield event.plain_result(await self._handle_checkin_ranking(event, "累计"))
+
+    @filter.regex(CHECKIN_REGEX_PATTERN)
+    async def checkin_auto_trigger(self, event: AstrMessageEvent):
+        """纯文本触发签到。"""
+        if not self._cfg_bool("checkin_enabled", True):
+            return
+        event.stop_event()
+        async for result in self._handle_checkin(event, silent_when_disabled=True):
+            yield result
+
+    @filter.command_group("签到商店")
+    def checkin_shop(self):
+        """签到金币商店。"""
+
+    @checkin_shop.command("查看")
+    async def cmd_checkin_shop(self, event: AstrMessageEvent):
+        """查看签到商店。"""
+        event.stop_event()
+        if not self._cfg_bool("checkin_enabled", True):
+            yield event.plain_result("签到功能已关闭")
+            return
+        yield event.plain_result(self._build_checkin_shop())
+
+    @checkin_shop.command("加持")
+    async def cmd_buy_checkin_boost(self, event: AstrMessageEvent, days: str = ""):
+        """购买好感度双倍加持。"""
+        event.stop_event()
+        async for result in self._handle_buy_checkin_boost(event, days):
+            yield result
+
+    @checkin_shop.command("主题列表")
+    async def cmd_checkin_themes(self, event: AstrMessageEvent):
+        """查看已购买和可购买的签到主题。"""
+        event.stop_event()
+        yield event.plain_result(await self._handle_checkin_themes(event))
+
+    @checkin_shop.command("主题查看")
+    async def cmd_preview_checkin_theme(self, event: AstrMessageEvent, theme: str = ""):
+        """查看指定签到主题的静态预览图。"""
+        event.stop_event()
+        yield await self._handle_checkin_theme_preview(event, theme)
+
+    @checkin_shop.command("主题购买")
+    async def cmd_buy_checkin_theme(self, event: AstrMessageEvent, theme: str = ""):
+        """购买签到主题，购买成功后自动切换。"""
+        event.stop_event()
+        yield event.plain_result(await self._handle_buy_checkin_theme(event, theme))
+
+    @checkin_shop.command("主题切换")
+    async def cmd_select_checkin_theme(self, event: AstrMessageEvent, theme: str = ""):
+        """切换到默认或已购买的签到主题。"""
+        event.stop_event()
+        yield event.plain_result(await self._handle_select_checkin_theme(event, theme))
+
+    @checkin_shop.command("刷新背景")
+    async def cmd_refresh_checkin_background(self, event: AstrMessageEvent):
+        """花费金币重新抽取今天的签到背景。"""
+        event.stop_event()
+        async for result in self._handle_refresh_checkin_background(event):
+            yield result
+
+    @filter.command_group("签到管理")
+    def checkin_admin(self):
+        """管理员签到维护功能。"""
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @checkin_admin.command("预览")
+    async def cmd_checkin_preview(self, event: AstrMessageEvent):
+        """用真实用户资料和问候配置预览卡片，不写入签到数据。"""
+        event.stop_event()
+        async for result in self._handle_checkin_preview(event):
+            yield result
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @checkin_admin.command("导出")
+    async def cmd_checkin_export(self, event: AstrMessageEvent):
+        """管理员导出签到完整备份。"""
+        event.stop_event()
+        result = await self._handle_checkin_export(event)
+        if result is not None:
+            yield result
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @checkin_admin.command("事件查看")
+    async def cmd_checkin_event_list(self, event: AstrMessageEvent):
+        """查看全局签到纪念日。"""
+        event.stop_event()
+        yield event.plain_result(
+            await self._handle_checkin_event_admin(event, "", "", "", "")
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @checkin_admin.command("事件添加")
+    async def cmd_checkin_event_add(
+        self,
+        event: AstrMessageEvent,
+        event_type: str = "",
+        date_value: str = "",
+        name: GreedyStr = GreedyStr,
+    ):
+        """添加年度或单次全局签到纪念日。"""
+        event.stop_event()
+        # 框架无参时传入空字符串；直接调用时则会保留默认哨兵。
+        raw_name = "" if name is GreedyStr else str(name or "")
+        yield event.plain_result(
+            await self._handle_checkin_event_admin(
+                event, "添加", event_type, date_value, raw_name
+            )
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @checkin_admin.command("事件删除")
+    async def cmd_checkin_event_delete(
+        self, event: AstrMessageEvent, event_id: str = ""
+    ):
+        """按事件 ID 删除全局签到纪念日。"""
+        event.stop_event()
+        yield event.plain_result(
+            await self._handle_checkin_event_admin(event, "删除", event_id, "", "")
+        )
+
+    @filter.regex(AUTO_TRIGGER_PATTERN)
+    async def auto_trigger(self, event: AstrMessageEvent):
+        """自然语言自动触发发图。"""
+        if not self._cfg_bool("auto_trigger_enabled", False):
+            return
+        if not self._ensure_client_or_error(event):
+            return
+
+        message = event.get_message_str().strip()
+        match = re.match(AUTO_TRIGGER_PATTERN, message)
+        if not match:
+            return
+
+        event.stop_event()
+
+        count_part = match.group(2).strip() if match.group(2) else ""
+        tag_part = (match.group(4) or "").strip()
+
+        # 解析数量：中文数字、阿拉伯数字
+        count_str = ""
+        raw = count_part if count_part else "1"
+        if raw.isdigit():
+            count_str = raw
+        else:
+            for cn_digit, arabic in CHINESE_NUMBER_MAP.items():
+                if raw == cn_digit:
+                    count_str = arabic
+                    break
+            if not count_str:
+                count_str = "1"
+
+        logger.info(
+            f"{LOG_PREFIX} 自然语言触发: count={count_str} "
+            f"tag_configured={'yes' if tag_part else 'no'}"
+        )
+        async for result in self._handle_search(
+            event, tag=tag_part, count_str=count_str
+        ):
+            yield result
+
+    # ──────────────────────────────────────────────────────────────
+    # 工具方法
+    # ──────────────────────────────────────────────────────────────
+
+    def _check_rate_limit(self, user_id: str) -> int:
+        """检查用户请求频率，返回需等待秒数（0 表示可立即请求）。"""
+        rate_limit = self._cfg_int("rate_limit_seconds", 3, 0, 60)
+        if rate_limit <= 0:
+            return 0
+        now = time.monotonic()
+        if len(self._last_request) > 1024:
+            cutoff = now - max(float(rate_limit) * 2, 60.0)
+            self._last_request = {
+                key: timestamp
+                for key, timestamp in self._last_request.items()
+                if timestamp >= cutoff
+            }
+        last = self._last_request.get(user_id, 0.0)
+        elapsed = now - last
+        if elapsed < rate_limit:
+            return int(rate_limit - elapsed) + 1
+        self._last_request[user_id] = now
+        return 0
+
+    def _checkin_flow_lock(self, user_id: str) -> asyncio.Lock:
+        locks = getattr(self, "_checkin_flow_locks", None)
+        if locks is None:
+            locks = weakref.WeakValueDictionary()
+            self._checkin_flow_locks = locks
+        lock = locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[user_id] = lock
+        return lock
+
+    # ──────────────────────────────────────────────────────────────
+    # 配置读取（带类型校验）
+    # ──────────────────────────────────────────────────────────────
+
+    def _migrate_dedupe_config(self) -> int:
+        config = getattr(self, "config", None)
+        if config is None:
+            return 1
+        if not self._cfg_bool("dedupe_days_migrated", False):
+            legacy_value = self._cfg_float("dedupe_ttl_hours", 24.0, 0.0, 24.0)
+            config["dedupe_days"] = 0 if legacy_value <= 0 else 1
+            config["dedupe_days_migrated"] = True
+            persisted = False
+            save_config = getattr(config, "save_config", None)
+            if callable(save_config):
+                try:
+                    save_config()
+                    persisted = True
+                except Exception as exc:
+                    logger.warning(
+                        f"{LOG_PREFIX} 保存去重配置迁移结果失败: "
+                        f"error_type={type(exc).__name__}"
+                    )
+            logger.info(
+                f"{LOG_PREFIX} 已迁移旧去重配置: "
+                f"dedupe_ttl_hours={legacy_value:g} -> "
+                f"dedupe_days={config['dedupe_days']}, persisted={persisted}"
+            )
+        return self._cfg_int("dedupe_days", 1, 0, 7)
+
+    def _cfg_str(self, key: str, default: str = "") -> str:
+        val = self.config.get(key, default)
+        return str(val).strip() if val is not None else default
+
+    def _cfg_int(self, key: str, default: int, lo: int, hi: int) -> int:
+        raw = self.config.get(key, default)
+        if isinstance(raw, (bool, float)):
+            return default
+        try:
+            val = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return val if lo <= val <= hi else default
+
+    def _cfg_float(self, key: str, default: float, lo: float, hi: float) -> float:
+        try:
+            val = float(self.config.get(key, default))
+        except (TypeError, ValueError):
+            return default
+        return val if lo <= val <= hi else default
+
+    def _cfg_bool(self, key: str, default: bool) -> bool:
+        val = self.config.get(key, default)
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            return val.lower() in ("true", "1", "yes")
+        return bool(val) if val is not None else default

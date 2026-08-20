@@ -1,0 +1,245 @@
+<div align="center">
+
+# 画境拾珍
+
+<img src="https://count.getloli.com/@astrbot-plugin-get-px?name=astrbot-plugin-get-px&theme=booru-jaypee&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="count" />
+
+一个面向 AstrBot 的发图与签到插件：Lolicon 优先取图，失败时可用 Pixiv refresh_token 回退，并在 WebUI 管理群排行、成员数值、年龄分级放行与黑名单、签到数据。
+
+![AstrBot](https://img.shields.io/badge/AstrBot-plugin-5865f2?style=flat-square)
+![Version](https://img.shields.io/badge/version-3.5.0-22c55e?style=flat-square)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-OneBot%20%2F%20aiocqhttp-f97316?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-3b82f6?style=flat-square)
+
+<br>
+<img src="logo.png" alt="画境拾珍 Logo" width="180">
+
+</div>
+
+## 目录
+
+- [界面展示](#界面展示)
+- [功能一览](#功能一览)
+- [快速开始](#快速开始)
+- [常用指令](#常用指令)
+- [自然语言触发](#自然语言触发)
+- [WebUI](#webui-插件管理中心)
+- [每日签到](#每日签到)
+- [推荐配置](#推荐配置)
+- [更多文档](#更多文档)
+
+## 界面展示
+
+### 签到卡主题
+
+| `04` · 新柳 | `05` · 荷风 |
+| :---: | :---: |
+| ![新柳](templates/checkin_themes/spring/preview.png) | ![荷风](templates/checkin_themes/summer/preview.png) |
+| `06` · 丹枫 | `07` · 寒梅 |
+| ![丹枫](templates/checkin_themes/autumn/preview.png) | ![寒梅](templates/checkin_themes/winter/preview.png) |
+
+签到卡支持 `省流量`（960×540）、`清晰`（1248×702）和 `极致`（1728×972）三档。`/签到商店 主题查看 <编号>` 可免费看预览（如 `/签到商店 主题查看 1`），不扣金币、不切换主题。
+
+### WebUI 管理中心
+
+<div align="center">
+<img src="Webui.png" alt="插件管理中心界面" width="100%">
+</div>
+
+<br>
+
+插件管理中心提供群排行与趋势图表、成员数值编辑、年龄分级放行与黑名单管理、签到数据备份功能，所有操作均通过可视化界面完成。
+
+## 功能一览
+
+| 场景 | 能力 |
+| --- | --- |
+| 搜图发图 | Lolicon / Nyan.run 双图片源标签搜索（支持多标签 AND）或随机取图，失败时回退 Pixiv 搜索/推荐，支持数量限制与原图自动降级 |
+| 图片来源 | Lolicon 与 Nyan.run (sex.nyan.run) 按「图片源顺序」依次尝试，顺序可配（含随机）；`pixiv_refresh_token` 可选，仅作最终回退 |
+| 内容分级与黑名单 | 年龄分级放行可配（`general`/`r18`/`all`，默认完全放行）；标签黑名单与作品 ID 黑名单完全自主管理 |
+| 每日签到 | H 纸张画册卡片、竖向随机背景、金币、好感度、连签、商店与主题 |
+| 管理中心 | 群排行与趋势、成员数值、分级放行与黑名单、签到备份 |
+| 稳定性 | 0–7 个自然日去重、发送失败重试、临时文件自动清理 |
+
+> 主要面向 QQ OneBot / aiocqhttp。其他平台会尽量降级为逐条发送，请自行测试兼容性。
+
+## 快速开始
+
+1. 在 AstrBot WebUI 插件页安装本插件：
+   - 下载本仓库 zip 后选择「导入压缩包」
+   - 或粘贴仓库地址：`https://github.com/shitianyaa/astrbot_plugin_get_px`
+2. 默认启用 Lolicon 与 Nyan.run (sex.nyan.run) 两个图片源，均无需 Token；需要 Pixiv 作为最终回退时再填写 `pixiv_refresh_token`（[如何获取](#获取-pixiv-token)）。图片源顺序可在 `image_source_mode` 中调整（`lolicon_first` / `nyan_first` / `random`）。
+3. 直接试试：
+
+```text
+/p 初音ミク 3
+/签到
+/签到我的
+/签到排行
+/签到商店
+/签到管理
+/签到帮助
+```
+
+默认分支仍不提供用于 Pixiv 登录、API 请求或图片下载的 HTTP/SOCKS 出站代理；这类网络代理请使用 [`proxy` 分支](https://github.com/shitianyaa/astrbot_plugin_get_px/tree/proxy)。如果只是 Lolicon 返回的图片地址不可用，可在 `lolicon_image_proxy_origins` 中按行填写图片反代 origin，插件只改写 Lolicon 图片 URL，不代理 API 或 Pixiv 登录。
+
+> [!WARNING]
+> **跨版本升级与签到数据**
+>
+> 从旧版本直接升级后如果发现签到数据缺失，请先安装 [v3.0.0](https://github.com/shitianyaa/astrbot_plugin_get_px/releases/tag/v3.0.0)，启动插件一次并确认旧签到数据迁移完成，再升级到最新版本。操作前请备份 AstrBot 插件数据目录中的 `checkin.sqlite3` 和 `checkin_backups/`，不要删除或覆盖原数据目录。
+
+> [!IMPORTANT]
+> **关于 T2I 渲染服务**
+>
+> 签到卡片依赖 AstrBot T2I（HTML 转图片）。公共 T2I 常有海外节点、体积限制或 SSL 问题，**强烈建议自建**。
+>
+> - 自部署文档：[AstrBot T2I 服务部署指南](https://docs.astrbot.app/others/self-host-t2i.html)
+
+## 常用指令
+
+| 指令 | 说明 | 示例 |
+| --- | --- | --- |
+| `/p [标签...] [数量]` | 按标签搜索发图；多个标签用空格分隔，只返回同时包含所有标签的作品 | `/p 白丝 贫乳 3` |
+| `/p [数量]` | 无标签时随机发图 | `/p 5` |
+| `/签到` | 每日签到 | `/签到` |
+| `/签到我的 状态` | 金币、好感、连签等 | `/签到我的 状态` |
+| `/签到排行 今日\|月榜\|连签\|累计` | 当前群的签到排行 | `/签到排行 月榜` |
+| `/签到商店 查看` | 加持、背景刷新、主题商品 | `/签到商店 查看` |
+| `/签到商店 主题查看 <编号>` | 免费主题预览 | `/签到商店 主题查看 1` |
+
+签到功能按四个独立指令组组织：
+
+```text
+签到我的：状态、生日查看/设置/清除、成就、称号查看、称号佩戴
+签到排行：今日、月榜、连签、累计
+签到商店：加持、主题列表/查看/购买/切换、刷新背景
+签到管理：预览、导出、事件查看/添加/删除
+```
+
+完整指令（含商店购买、生日、成就、管理员事件/导出等）见 [指令参考](docs/user/commands.md)。
+
+> 指令名如与其他插件冲突，可在 AstrBot Dashboard 的指令管理（`alter_cmd`）中调整对应指令的权限或停用状态。
+> 文档使用默认前缀 `/`；实际可替换为 AstrBot `wake_prefix` 中配置的 `.`、`。` 等前缀。
+
+## 自然语言触发
+
+开启 `auto_trigger_enabled` 后可不带命令前缀触发：
+
+| 触发语 | 效果 |
+| --- | --- |
+| `来一份图` | 1 张随机图片 |
+| `来三张初音ミク图` | 搜索并发送 3 张 |
+| `来两张萝莉图` | 搜索并发送 2 张 |
+| `来张风景图` | 搜索并发送 1 张 |
+| `签到` | 每日签到 |
+
+## WebUI 插件管理中心
+
+AstrBot WebUI 插件页的「pluginCenter」可：
+
+- 按群查看今日 / 月度 / 连签 / 累计排行与 7/30 天趋势
+- 搜索成员并调整金币、好感度、累计与连续签到当前值
+- 维护标签黑名单与作品 ID 黑名单
+- 设置年龄分级放行（general / r18 / all）
+- 下载 / 上传签到备份（导出 schema v7，并兼容导入 schema v6）
+
+成员数值编辑只改当前资料，不回写历史奖励、群排行或已生成卡片。
+
+## 每日签到
+
+- 奖励全局一天一次；群榜按实际签到的群分别记录，不重复发金币。
+- 重复签到不重奖，重发当天缓存卡片。
+- 商店：加持 200/500/1000；背景刷新默认 100（可配）；非默认主题默认每套 1500（可配）。默认「米白」免费。
+
+细则（好感等级、卡片规格、问候 24/32 字、生日事件、称号、节假日等）见 [签到说明](docs/user/checkin.md)。
+
+## 推荐配置
+
+| 配置 | 建议 |
+| --- | --- |
+| `pixiv_refresh_token` | 可选，作为 Lolicon / Nyan.run 都失败后的 Pixiv 回退 |
+| `image_source_mode` | 默认 `lolicon_first`；想多用 Nyan.run 可设 `nyan_first`，想平均使用设 `random` |
+| `image_quality` | 省流量用 `large`，优先原图用 `original` |
+| `send_as_forward` | QQ 场景建议开启 |
+| `checkin_card_quality_tier` | 默认 `省流量`；日常推荐 `清晰`，高分辨率显示可选 `极致` |
+| `dedupe_days` | 默认 `1`；需要跨日避免重复时可设为 `2–7`，`0` 为关闭 |
+| `lolicon_image_proxy_origins` | 图片地址无法访问时再配置；每行一个 http(s) origin |
+| `auto_trigger_enabled` | 需要「来张图」时再开 |
+
+<details>
+<summary>完整配置项</summary>
+
+| 配置 | 说明 | 默认值 |
+| --- | --- | --- |
+| `pixiv_refresh_token` | Pixiv refresh_token，可选回退 | 空 |
+| `lolicon_api_url` | Lolicon 图片源地址；留空时停用 Lolicon | `https://api.lolicon.app/setu/v2` |
+| `nyan_run_enabled` | 是否启用 Nyan.run (sex.nyan.run) 图片源 | `true` |
+| `nyan_run_api_url` | Nyan.run API 地址；留空时停用该源 | `https://sex.nyan.run/api/v2/` |
+| `image_source_mode` | 图片源顺序：`lolicon_first` / `nyan_first` / `random`，失败自动尝试下一个 | `lolicon_first` |
+| `lolicon_exclude_ai` | 请求 Lolicon 时排除 AI 作品 | `true` |
+| `rating_policy` | 年龄分级放行：`general`=仅普通、`r18`=普通+R-18、`all`=全部（含 R-18G）；Nyan.run 仅支持 r18 布尔开关 | `all` |
+| `lolicon_image_proxy_origins` | 可选 Lolicon 图片反代 origin，多行按顺序轮换；不代理 API 或 Pixiv 登录 | 空 |
+| `filter_manga` | 过滤 Pixiv 回退结果中的漫画作品 | `true` |
+| `max_count` | 单次最大发送数量，范围 1-20 | `5` |
+| `dedupe_days` | 最近 `0–7` 个北京时间自然日去重；`0` 为关闭并清空去重索引 | `1` |
+| `request_timeout` | 单张图片下载超时，单位秒 | `30` |
+| `image_quality` | 图片质量：`original`、`large`、`medium` | `original` |
+| `auto_downgrade_original_mb` | 原图超过该大小时自动降级，单位 MiB；`0` 为禁用 | `3.0` |
+| `send_as_forward` | 多图以合并转发发送；非 QQ 平台不支持时自动逐条发送 | `true` |
+| `auto_trigger_enabled` | 自然语言自动触发 | `false` |
+| `checkin_enabled` | 签到开关 | `true` |
+| `checkin_bot_name` | 签到卡片中的 bot 角色名 | `neko` |
+| `checkin_background_mode` | 签到背景模式：`pixiv_daily` 或 `custom`；自定义背景不可用时继续尝试在线图片源 | `pixiv_daily` |
+| `checkin_background_refresh_cost` | 用户更新当天在线背景所需金币；范围 `0–500`，`0` 为免费 | `100` |
+| `checkin_theme_cost` | 非默认签到主题的统一价格；范围 `0–5000`，`0` 为免费 | `1500` |
+| `checkin_background_tag` | 签到背景标签；留空时按图片源顺序随机取图，失败后使用 Pixiv 推荐作品 | 空 |
+| `checkin_custom_background` | 本地图片路径；默认主题按竖向作品相框完整显示 | 空 |
+| `checkin_avatar_enabled` | 签到卡片显示用户头像 | `true` |
+| `checkin_card_quality_tier` | 签到卡画质：`省流量` / `清晰` / `极致`；预览和刷新背景立即生效，普通重复签到保持当天档位 | `省流量` |
+| `checkin_greeting_mode` | 签到问候来源：`local` / `hitokoto` / `ai` | `hitokoto` |
+| `checkin_hitokoto_categories` | 一言类型中文多选；选择”全部”或留空时从全部分类随机 | `全部` |
+| `checkin_ai_greeting_provider_id` | 签到问候文本模型；留空时尝试当前会话模型，仍不可用则使用本地文案 | 空 |
+| `checkin_ai_greeting_prompt` | 自定义角色和语气；固定安全约束由插件以 system prompt 追加 | 见配置页 |
+| `checkin_ai_greeting_timeout` | 单次问候模型调用超时秒数；失败后回退本地文案 | `8.0` |
+| `checkin_hitokoto_timeout` | 一言 API 请求超时秒数；失败后回退本地文案 | `5.0` |
+| `rate_limit_seconds` | 同一用户请求频率限制，单位秒；`0` 为禁用 | `3` |
+| `webui_font_source` | WebUI 字体来源：`mirror`、`official`、`none` | `mirror` |
+
+</details>
+
+## 更多文档
+
+| 文档 | 内容 |
+| --- | --- |
+| [指令参考](docs/user/commands.md) | 全部指令与自然语言触发 |
+| [签到说明](docs/user/checkin.md) | 发奖、商店、好感、卡片、问候、生日事件与称号 |
+| [项目架构](docs/project/architecture.md) | 模块划分（开发用） |
+
+**数据简述：** 发图去重窗口与签到数据保存在插件数据目录；发送用临时图发完即清；签到 JPEG 缓存按天自过期，不会整目录清空数据库、黑名单或备份。
+
+AI 签到问候会向所选 AstrBot 文本模型发送可用昵称、日期、签到统计、关系阶段、奖励、称号和成就；不会把用户 ID 当作昵称发送，昵称不可用时使用“匿名用户”。模型异常、错误角色或输出不合规时使用已保存的本地问候。
+
+## 获取 Pixiv Token
+
+Pixiv 仅作为可选回退。使用 [piglig/pixiv-token](https://github.com/piglig/pixiv-token) 获取 `refresh_token`，填入 `pixiv_refresh_token`。该工具基于 Playwright 自动完成 Pixiv OAuth 登录并取回 token，按仓库说明运行即可。
+
+## 依赖
+
+```text
+pixivpy-async
+aiohttp
+Pillow
+lunar-python
+```
+
+## 致谢
+
+- 首选图片源由 [Lolicon API](https://api.lolicon.app/) 提供
+- Pixiv 回退基于 [pixivpy-async](https://github.com/Mikubill/pixivpy-async)
+- Pixiv `refresh_token` 获取方案来自 [piglig/pixiv-token](https://github.com/piglig/pixiv-token)，感谢 [piglig](https://github.com/piglig) 提供基于 Playwright 的 OAuth 自动取码工具
+- 作品黑名单缩略图生成基于 [Pillow](https://python-pillow.org/)
+- 签到每日一言由 [Hitokoto API](https://github.com/hitokoto-osc/hitokoto-api) 提供，感谢一言开源社区和公共 API 服务
+- 签到卡片内置字体由 [霞鹜文楷轻便版](https://github.com/lxgw/LxgwWenKai-Lite) 生成，采用 SIL Open Font License 1.1 授权
+- 每日签到设计参考 [zhenxun_bot](https://github.com/zhenxun-org/zhenxun_bot)
+- [PeeGayhub Telegram 表情包系列](https://t.me/addstickers/PeeGayhub)：插件图标借鉴了该系列表情包风格；图标素材由 GPT 生成。

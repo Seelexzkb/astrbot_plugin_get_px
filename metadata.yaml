@@ -1,0 +1,10 @@
+name: astrbot_plugin_get_px
+display_name: 画境拾珍
+short_desc: Lolicon / Nyan.run 双图片源、Pixiv 可选回退的发图与签到插件
+desc: 通过 Lolicon 或 Nyan.run (sex.nyan.run) 标签搜索（支持多标签 AND）或随机获取插画，顺序可配，失败时可用 Pixiv refresh_token 回退到搜索或推荐作品。支持年龄分级放行配置（默认完全放行）、标签与作品黑名单自主管理、每日签到、群签到排行、主题商店、WebUI 管理中心、请求频率限制和发送重试。
+version: v3.5.0
+author: Sham1k0
+repo: https://github.com/shitianyaa/astrbot_plugin_get_px
+astrbot_version: ">=4.16"
+support_platforms:
+  - aiocqhttp
