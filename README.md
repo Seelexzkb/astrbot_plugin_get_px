@@ -4,7 +4,9 @@
 
 <img src="https://count.getloli.com/@astrbot-plugin-get-px?name=astrbot-plugin-get-px&theme=booru-jaypee&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="count" />
 
-一个面向 AstrBot 的发图与签到插件：Lolicon 优先取图，失败时可用 Pixiv refresh_token 回退，并在 WebUI 管理群排行、成员数值、年龄分级放行与黑名单、签到数据。
+一个面向 AstrBot 的发图与签到插件：Lolicon 优先取图，失败时可用 Pixiv refresh_token 回退，并在 WebUI 管理群排行、成员数值、年龄分级放行与黑名单、签到数据。 
+
+在原插件的基础上删除了强制R18分级审查以及默认屏蔽词，现在用户可以自由控制获取图片的年龄分级及屏蔽tag。
 
 ![AstrBot](https://img.shields.io/badge/AstrBot-plugin-5865f2?style=flat-square)
 ![Version](https://img.shields.io/badge/version-3.5.0-22c55e?style=flat-square)
@@ -19,15 +21,22 @@
 
 ## 目录
 
-- [界面展示](#界面展示)
-- [功能一览](#功能一览)
-- [快速开始](#快速开始)
-- [常用指令](#常用指令)
-- [自然语言触发](#自然语言触发)
-- [WebUI](#webui-插件管理中心)
-- [每日签到](#每日签到)
-- [推荐配置](#推荐配置)
-- [更多文档](#更多文档)
+- [画境拾珍](#画境拾珍)
+  - [目录](#目录)
+  - [界面展示](#界面展示)
+    - [签到卡主题](#签到卡主题)
+    - [WebUI 管理中心](#webui-管理中心)
+  - [功能一览](#功能一览)
+  - [快速开始](#快速开始)
+  - [常用指令](#常用指令)
+  - [自然语言触发](#自然语言触发)
+  - [WebUI 插件管理中心](#webui-插件管理中心)
+  - [每日签到](#每日签到)
+  - [推荐配置](#推荐配置)
+  - [更多文档](#更多文档)
+  - [获取 Pixiv Token](#获取-pixiv-token)
+  - [依赖](#依赖)
+  - [致谢](#致谢)
 
 ## 界面展示
 
