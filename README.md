@@ -245,6 +245,7 @@ lunar-python
 ## 致谢
 
 - 首选图片源由 [Lolicon API](https://api.lolicon.app/) 提供
+- 添加图片源由 [Nyan.run](https://sex.nyan.run/)提供
 - Pixiv 回退基于 [pixivpy-async](https://github.com/Mikubill/pixivpy-async)
 - Pixiv `refresh_token` 获取方案来自 [piglig/pixiv-token](https://github.com/piglig/pixiv-token)，感谢 [piglig](https://github.com/piglig) 提供基于 Playwright 的 OAuth 自动取码工具
 - 作品黑名单缩略图生成基于 [Pillow](https://python-pillow.org/)
